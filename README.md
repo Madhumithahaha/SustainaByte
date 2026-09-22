@@ -7,7 +7,7 @@
 
 ---
 
-## 📌 Problem Statement: S3 (Sustainable AI Lifecycle Auditor)
+## 📌 Problem Statement: Sustainable AI Lifecycle Auditor
 
 Modern machine learning development disproportionately optimizes for accuracy while ignoring the compounding carbon footprint across the ML lifecycle. Problem Statement S3 challenges teams to:
 
