@@ -7,6 +7,7 @@ import plotly.express as px
 
 from auditor.architectures import get_architectures
 from auditor.lifecycle_math import calculate_lifecycle_impact
+from auditor.gemini_auditor import run_lifecycle_audit
 
 
 # --------------------------------------------------
@@ -79,6 +80,11 @@ pue = st.sidebar.number_input(
     step=0.1
 )
 
+workload_desc = st.sidebar.text_input(
+    "Workload description",
+    value="Customer Support Bot"
+)
+
 
 # --------------------------------------------------
 # LOAD ARCHITECTURES
@@ -137,22 +143,66 @@ for name, architecture in architectures.items():
         and architecture["accuracy"] >= minimum_accuracy
     )
 
-    results_list.append({
-        "Architecture": name,
-        "Latency (ms)": architecture["latency_ms"],
-        "Accuracy (%)": architecture["accuracy"],
-        "Eligible": "Yes" if is_eligible else "No",
-        "Hardware Carbon (kg)": impact["hardware_carbon_kg"],
-        "Inference Energy (kWh)": impact["inference_energy_kwh"],
-        "Storage (GB-hours)": impact["storage_impact_gb_hours"],
-        "Networking Energy (kWh)": impact["networking_energy_kwh"],
-        "Retraining Energy (kWh)": impact["retraining_energy_kwh"],
-        "Total Energy (kWh)": impact["total_energy_kwh"],
-        "Total Carbon (kg)": impact["total_carbon_kg"]
+    # Build enriched model dict with all keys needed by gemini_auditor + UI
+    enriched = {
+        "name": name,
+        "accuracy": architecture["accuracy"],
+        "latency_ms": architecture["latency_ms"],
+        "description": architecture.get("description", ""),
+        "hardware_carbon_kg": impact["hardware_carbon_kg"],
+        "inference_energy_kwh": impact["inference_energy_kwh"],
+        "inference_carbon_kg": impact["inference_carbon_kg"],
+        "storage_impact_gb_hours": impact["storage_impact_gb_hours"],
+        "networking_energy_kwh": impact["networking_energy_kwh"],
+        "retraining_energy_kwh": impact["retraining_energy_kwh"],
+        "total_energy_kwh": impact["total_energy_kwh"],
+        "total_carbon_kg": impact["total_carbon_kg"],
+        "eligible": is_eligible,
+    }
+
+    results_list.append(enriched)
+
+
+# --------------------------------------------------
+# FIND WINNER (lowest carbon among eligible)
+# --------------------------------------------------
+
+eligible_models = [m for m in results_list if m["eligible"]]
+winner_name = None
+
+if eligible_models:
+    winner = min(eligible_models, key=lambda m: m["total_carbon_kg"])
+    winner_name = winner["name"]
+
+
+# --------------------------------------------------
+# BUILD DISPLAY DATAFRAME
+# --------------------------------------------------
+
+display_rows = []
+for m in results_list:
+    if m["name"] == winner_name:
+        status = "✅ Winner"
+    elif m["eligible"]:
+        status = "✔️ Eligible"
+    else:
+        status = "❌ Disqualified"
+
+    display_rows.append({
+        "Status": status,
+        "Architecture": m["name"],
+        "Latency (ms)": m["latency_ms"],
+        "Accuracy (%)": m["accuracy"],
+        "Hardware Carbon (kg)": m["hardware_carbon_kg"],
+        "Inference Energy (kWh)": m["inference_energy_kwh"],
+        "Storage (GB-hours)": m["storage_impact_gb_hours"],
+        "Networking Energy (kWh)": m["networking_energy_kwh"],
+        "Retraining Energy (kWh)": m["retraining_energy_kwh"],
+        "Total Energy (kWh)": m["total_energy_kwh"],
+        "Total Carbon (kg)": m["total_carbon_kg"],
     })
 
-
-results_df = pd.DataFrame(results_list)
+results_df = pd.DataFrame(display_rows)
 
 
 # --------------------------------------------------
@@ -162,10 +212,10 @@ results_df = pd.DataFrame(results_list)
 st.header("🏗️ Architecture Comparison")
 
 display_columns = [
+    "Status",
     "Architecture",
     "Latency (ms)",
     "Accuracy (%)",
-    "Eligible",
     "Total Energy (kWh)",
     "Total Carbon (kg)"
 ]
@@ -181,13 +231,9 @@ st.dataframe(
 # RECOMMENDATION
 # --------------------------------------------------
 
-eligible_df = results_df[
-    results_df["Eligible"] == "Yes"
-]
-
 st.header("🌱 Architecture Recommendation")
 
-if eligible_df.empty:
+if not eligible_models:
 
     st.warning(
         "No architecture satisfies both the latency and accuracy requirements."
@@ -199,14 +245,14 @@ if eligible_df.empty:
 
 else:
 
-    recommended_row = eligible_df.loc[
-        eligible_df["Total Carbon (kg)"].idxmin()
-    ]
+    recommended_row = results_df.loc[
+        results_df["Status"] == "✅ Winner"
+    ].iloc[0]
 
     recommended_name = recommended_row["Architecture"]
 
     st.success(
-        f"Lowest-carbon eligible architecture: {recommended_name}"
+        f"Lowest-carbon eligible architecture: **{recommended_name}**"
     )
 
     recommendation_col1, recommendation_col2, recommendation_col3 = (
@@ -233,6 +279,24 @@ else:
 
 
 # --------------------------------------------------
+# ECO-NUTRITION LABEL (Gemini)
+# --------------------------------------------------
+
+st.header("🍃 AI Eco-Nutrition Label")
+
+if st.button("Generate Eco-Nutrition Label", type="primary"):
+    with st.spinner("Auditing lifecycle impact with Gemini..."):
+        label_md = run_lifecycle_audit(
+            workload_desc=workload_desc,
+            target_acc=minimum_accuracy,
+            max_lat=maximum_latency,
+            audited_models=results_list,
+        )
+    with st.expander("Eco-Nutrition Label", expanded=True):
+        st.markdown(label_md)
+
+
+# --------------------------------------------------
 # CARBON COMPARISON CHART
 # --------------------------------------------------
 
@@ -253,11 +317,12 @@ st.plotly_chart(
 
 
 # --------------------------------------------------
-# SIX-PILLAR IMPACT CHART
+# LIFECYCLE IMPACT BREAKDOWN
 # --------------------------------------------------
 
 st.header("🌍 Lifecycle Impact Breakdown")
 
+# ── Normalize each pillar to 0–100% across architectures ─────────────
 pillar_columns = [
     "Hardware Carbon (kg)",
     "Inference Energy (kWh)",
@@ -266,29 +331,36 @@ pillar_columns = [
     "Retraining Energy (kWh)"
 ]
 
-selected_pillars = results_df[
-    ["Architecture"] + pillar_columns
-]
+pillar_data = results_df[["Architecture"] + pillar_columns].copy()
 
-pillars_long = selected_pillars.melt(
+# Melt to long form first (raw values)
+pillar_long = pillar_data.melt(
     id_vars="Architecture",
     var_name="Impact Category",
-    value_name="Estimated Value"
+    value_name="Raw Value"
 )
+
+# Normalize: for each pillar, divide by its max across all architectures
+pillar_long["Normalized (%)"] = pillar_long.groupby("Impact Category")["Raw Value"].transform(
+    lambda col: (col / col.max() * 100) if col.max() > 0 else 0
+)
+
+# Format raw value for tooltip
+pillar_long["Raw Label"] = pillar_long["Raw Value"].apply(lambda v: f"{v:,.4f}")
 
 pillar_chart = px.bar(
-    pillars_long,
+    pillar_long,
     x="Architecture",
-    y="Estimated Value",
+    y="Normalized (%)",
     color="Impact Category",
     barmode="group",
-    title="Lifecycle Impact Categories"
+    title="Lifecycle Impact Breakdown (normalized to 0–100% per pillar)",
+    hover_data={"Raw Value": ":.4f", "Normalized (%)": ":.1f"},
 )
 
-st.plotly_chart(
-    pillar_chart,
-    use_container_width=True
-)
+pillar_chart.update_yaxes(title_text="Relative Impact (%)", range=[0, 105])
+
+st.plotly_chart(pillar_chart, use_container_width=True)
 
 
 # --------------------------------------------------

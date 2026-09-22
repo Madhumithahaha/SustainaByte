@@ -13,7 +13,7 @@ from google import genai
 from google.genai import errors
 
 # ── Configuration ────────────────────────────────────────────────────────────
-DEBUG_MODE = True  # Set True to skip real API calls and use a fake response
+DEBUG_MODE = False  # Set True to skip real API calls and use a fake response
 
 # ── Environment & Client ────────────────────────────────────────────────────
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -30,23 +30,53 @@ print(f"[DEBUG] DEBUG_MODE: {DEBUG_MODE}")
 
 client = genai.Client()
 
-# ── Fake response for DEBUG_MODE ─────────────────────────────────────────────
-_FAKE_GEMINI_RESPONSE = """\
-# Eco-Nutrition Label: DEBUG MODE
+# ── Debug label builder (real numbers, no API call) ─────────────────────────
+def _build_debug_label(winner, worst, workload_desc):
+    """Build a truthful Eco-Nutrition Label from real model data (no Gemini)."""
 
-### 1. Energy Efficiency Grade
-**A** (Winning Model: identified by lowest lifecycle carbon)
+    carbon_diff = worst["total_carbon_kg"] - winner["total_carbon_kg"]
+    acc_diff = worst.get("accuracy", 0) - winner.get("accuracy", 0)
+    lat_diff = worst.get("latency_ms", 0) - winner.get("latency_ms", 0)
 
-### 2. Total Avoided CO2e
-**4,200 kg CO2e**
+    if worst["total_carbon_kg"] > 0:
+        reduction_pct = (carbon_diff / worst["total_carbon_kg"]) * 100
+    else:
+        reduction_pct = 0
 
-### 3. Migration Trade-off Analysis
-* **Accuracy:** Minor drop of ~3% from the worst model, well within SLA tolerance.
-* **Latency:** Significant improvement — winner responds 4x faster.
-* **Carbon Impact:** 84% reduction in total lifecycle emissions.
-* **Operational Cost:** Lower compute requirements translate to ~60% infrastructure savings.
-* **Risk:** Smaller model may underperform on edge-case queries requiring deep reasoning.
-"""
+    # Assign grade based on reduction percentage
+    if reduction_pct >= 80:
+        grade = "A+"
+    elif reduction_pct >= 60:
+        grade = "A"
+    elif reduction_pct >= 40:
+        grade = "B+"
+    elif reduction_pct >= 20:
+        grade = "B"
+    elif reduction_pct >= 10:
+        grade = "C"
+    elif reduction_pct > 0:
+        grade = "D"
+    else:
+        grade = "F (identical models)"
+
+    return (
+        f"# Eco-Nutrition Label: {workload_desc} (DEBUG MODE)\n\n"
+        f"### 1. Energy Efficiency Grade\n"
+        f"**{grade}** (Winning Model: {winner['name']})\n\n"
+        f"### 2. Total Avoided CO2e\n"
+        f"**{carbon_diff:,.2f} kg CO2e**\n\n"
+        f"### 3. Migration Trade-off Analysis\n"
+        f"* **Accuracy:** {'+' if acc_diff >= 0 else ''}{acc_diff:.1f}% change "
+        f"({worst.get('accuracy', 'N/A')}% → {winner.get('accuracy', 'N/A')}%).\n"
+        f"* **Latency:** {'+' if lat_diff >= 0 else ''}{lat_diff:.0f} ms change "
+        f"({worst.get('latency_ms', 'N/A')} ms → {winner.get('latency_ms', 'N/A')} ms).\n"
+        f"* **Carbon Impact:** {reduction_pct:.1f}% reduction in total lifecycle emissions "
+        f"({worst['total_carbon_kg']:,.2f} kg → {winner['total_carbon_kg']:,.2f} kg).\n"
+        f"* **Operational Cost:** Lower carbon correlates with reduced compute; "
+        f"estimated proportional infrastructure savings.\n"
+        f"* **Risk:** Smaller/lighter model may underperform on edge-case queries "
+        f"requiring deep reasoning.\n"
+    )
 
 
 def run_lifecycle_audit(workload_desc, target_acc, max_lat, audited_models):
@@ -63,7 +93,7 @@ def run_lifecycle_audit(workload_desc, target_acc, max_lat, audited_models):
         Maximum acceptable latency in milliseconds.
     audited_models : list[dict]
         Each dict must contain: name, accuracy, latency_ms,
-        total_lifecycle_carbon_kg.
+        total_carbon_kg.
 
     Returns
     -------
@@ -88,12 +118,12 @@ def run_lifecycle_audit(workload_desc, target_acc, max_lat, audited_models):
         )
 
     # ── 2. Identify the winner (lowest carbon) and worst (highest carbon) ─
-    winner = min(valid_models, key=lambda m: m["total_lifecycle_carbon_kg"])
-    worst = max(valid_models, key=lambda m: m["total_lifecycle_carbon_kg"])
+    winner = min(valid_models, key=lambda m: m["total_carbon_kg"])
+    worst = max(valid_models, key=lambda m: m["total_carbon_kg"])
 
     print(f"[DEBUG] Valid models after filtering: {[m['name'] for m in valid_models]}")
-    print(f"[DEBUG] Winner (lowest carbon): {winner['name']} ({winner['total_lifecycle_carbon_kg']} kg)")
-    print(f"[DEBUG] Worst  (highest carbon): {worst['name']} ({worst['total_lifecycle_carbon_kg']} kg)")
+    print(f"[DEBUG] Winner (lowest carbon): {winner['name']} ({winner['total_carbon_kg']} kg)")
+    print(f"[DEBUG] Worst  (highest carbon): {worst['name']} ({worst['total_carbon_kg']} kg)")
 
     # ── 3. Build the prompt ──────────────────────────────────────────────
     prompt = (
@@ -122,10 +152,10 @@ def run_lifecycle_audit(workload_desc, target_acc, max_lat, audited_models):
         "Generate the **Eco-Nutrition Label** now."
     )
 
-    # ── 4. DEBUG_MODE: return fake response without hitting the API ───────
+    # ── 4. DEBUG_MODE: return computed label without hitting the API ─────
     if DEBUG_MODE:
-        print("[DEBUG] DEBUG_MODE=True — skipping real API call, returning fake response.")
-        return _FAKE_GEMINI_RESPONSE
+        print("[DEBUG] DEBUG_MODE=True — skipping real API call, returning computed debug label.")
+        return _build_debug_label(winner, worst, workload_desc)
 
     # ── 5. Call Gemini via Chat session (primary key → backup key → mock) ─
     _model = "gemini-3.5-flash-lite"
@@ -210,19 +240,19 @@ if __name__ == "__main__":
             "name": "70B Cloud GPU",
             "accuracy": 96,
             "latency_ms": 350,        # ← FAILS latency SLA (> 200 ms)
-            "total_lifecycle_carbon_kg": 5200,
+            "total_carbon_kg": 5200,
         },
         {
             "name": "14B Distilled",
             "accuracy": 85,            # ← FAILS accuracy SLA (< 90%)
             "latency_ms": 60,
-            "total_lifecycle_carbon_kg": 1400,
+            "total_carbon_kg": 1400,
         },
         {
             "name": "8B Quantized Edge",
             "accuracy": 91,            # ✅ passes accuracy (≥ 90)
             "latency_ms": 42,          # ✅ passes latency  (≤ 200)
-            "total_lifecycle_carbon_kg": 780,
+            "total_carbon_kg": 780,
         },
     ]
 
