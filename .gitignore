@@ -1,4 +1,6 @@
 # Byte-compiled / optimized / DLL files
+data/*.db
+data/*.db-journal
 __pycache__/
 <<<<<<< HEAD
 *.py[cod]
